@@ -84,6 +84,24 @@ npm run dev
 
 Webhook endpoint: `http://localhost:3000/api/monday/webhook`
 
+### Health check
+
+`GET /api/monday/webhook` returns a JSON status you can open in a browser to confirm
+a deployment is live and correctly configured — **before** sending a test email:
+
+```json
+{
+  "status": "ok",
+  "signatureVerification": "enabled",
+  "rollout": { "mode": "guarded", "allowedAccountCount": 1 },
+  "config": { "apiToken": true, "accountsBoardId": true, "contactOutreachDate": true, "...": true }
+}
+```
+
+Each `config` flag is `true` only when that env var is set and not left as a
+placeholder, so a `false` immediately points at a missing variable in your host's
+settings. No secrets or IDs are exposed.
+
 ### 5. Deploy
 
 Deploy to any Node host (e.g. Vercel: `npx vercel`). Set the same environment
@@ -106,6 +124,21 @@ On your **Accounts** board → **Automate → Create custom automation**:
 - Trigger: **When Next Follow-Up Date arrives**
 - Action 1: **Send Slack notification** → your channel
 - Action 2: **Set Next Follow-Up Date to blank** (prevents re-firing)
+
+## Security: webhook signature verification
+
+Monday signs every webhook with a JWT in the `Authorization` header (HS256, keyed by
+your app's **Signing Secret**, found at monday.com → Developers → your app → Signing
+Secret). Set `MONDAY_SIGNING_SECRET` to enable verification:
+
+- **Set** → event requests must carry a valid, unexpired signature, or they're
+  rejected with `401`. (The registration challenge is still allowed through, since it
+  carries no data and proves URL ownership.)
+- **Unset** → verification is skipped and a warning is logged. **Set it before
+  exposing the endpoint publicly.**
+
+Verification uses Node's `crypto` directly (no dependencies) and always computes
+HMAC-SHA256, so it isn't vulnerable to JWT algorithm-confusion attacks.
 
 ## Guarded rollout
 

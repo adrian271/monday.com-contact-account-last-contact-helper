@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
+  ACCOUNTS_BOARD_ID,
+  ALLOWED_ACCOUNT_IDS,
   COLUMN_IDS,
   addDaysUTC,
   findLinkedAccountId,
@@ -8,13 +10,61 @@ import {
   rollUpAccountOutreach,
   writeAccountDate,
 } from '@/lib/monday';
+import { MONDAY_SIGNING_SECRET, verifyMondaySignature } from '@/lib/auth';
+
+// crypto-based signature verification requires the Node.js runtime.
+export const runtime = 'nodejs';
+
+// Health check — confirms the deployment is live and reports its configuration
+// state WITHOUT exposing any secrets or actual IDs. Useful before sending a test
+// email: hit GET /api/monday/webhook and check everything reads "configured".
+export async function GET() {
+  // A value is "configured" if it's set and not left as a YOUR_* placeholder.
+  const configured = (v: string | undefined) => Boolean(v) && !v!.startsWith('YOUR_');
+
+  return NextResponse.json({
+    status: 'ok',
+    service: 'monday-account-followup',
+    signatureVerification: MONDAY_SIGNING_SECRET ? 'enabled' : 'disabled (set MONDAY_SIGNING_SECRET)',
+    rollout:
+      ALLOWED_ACCOUNT_IDS.length > 0
+        ? { mode: 'guarded', allowedAccountCount: ALLOWED_ACCOUNT_IDS.length }
+        : { mode: 'all accounts' },
+    config: {
+      apiToken: Boolean(process.env.MONDAY_API_TOKEN),
+      accountsBoardId: configured(ACCOUNTS_BOARD_ID),
+      contactOutreachDate: configured(COLUMN_IDS.contactOutreachDate),
+      contactAccountLink: configured(COLUMN_IDS.contactAccountLink),
+      accountContactsLink: configured(COLUMN_IDS.accountContactsLink),
+      accountLatestOutreach: configured(COLUMN_IDS.accountLatestOutreach),
+      accountInterval: configured(COLUMN_IDS.accountInterval),
+      accountNextFollowUp: configured(COLUMN_IDS.accountNextFollowUp),
+    },
+  });
+}
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
 
   // Monday sends a challenge on webhook registration — must echo it back.
+  // The challenge carries no data and proves URL ownership, so it's allowed
+  // through before signature checks (Monday may send it without a signature).
   if (body.challenge) {
     return NextResponse.json({ challenge: body.challenge });
+  }
+
+  // Verify the webhook signature on real events.
+  if (MONDAY_SIGNING_SECRET) {
+    const verdict = verifyMondaySignature(req.headers.get('authorization'));
+    if (!verdict.ok) {
+      console.warn(`[monday-webhook] Rejected unsigned/invalid request: ${verdict.reason}`);
+      return NextResponse.json({ status: 'unauthorized', reason: verdict.reason }, { status: 401 });
+    }
+  } else {
+    console.warn(
+      '[monday-webhook] MONDAY_SIGNING_SECRET is not set — skipping signature verification. ' +
+        'Set it before exposing this endpoint publicly.'
+    );
   }
 
   const event = body.event;
