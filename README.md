@@ -3,25 +3,52 @@
 A small Next.js service that gives each **Account** (organization) in Monday.com its
 own follow-up clock. When anyone at an account is contacted, the service rolls the
 most-recent outreach up to the account and calculates the account's **Next Follow-Up
-Date** from that account's own interval. Monday's native automations then handle the
-reminder + Slack notification.
+Date** from a cadence that depends on the account's **Status**. A daily sweep
+escalates follow-ups nobody has acted on (twice, in business days, then stops).
+Monday's native automation handles the Slack notification.
 
 See [WHY.md](./WHY.md) for the reasoning behind this design.
 
 ## How it works
 
+There are two moving parts: a **webhook** that reacts to outreach in real time, and a
+**daily sweep** that escalates follow-ups nobody has acted on.
+
 ```
+# Real-time (webhook)
 Contact reached out to → Monday stamps the contact's Latest Outreach Date
   → Monday webhook fires → POST /api/monday/webhook
   → Service finds the Account linked to that contact
   → Reads Latest Outreach Date across ALL of the account's contacts, takes the most recent
   → Writes it to the account's "Acct Latest Outreach (calc)" column
-  → Reads the account's Follow-Up Interval (days), adds it → account Next Follow-Up Date
-  → Monday native automation: when Next Follow-Up Date arrives → Slack notification → clear date
+  → Reads the account's Status → maps it to an interval → adds it (landing on a weekday)
+    → account Next Follow-Up Date (and resets the escalation counter)
+  → Monday native automation: when Next Follow-Up Date arrives → Slack notification
+
+# Daily (cron sweep)
+GET /api/cron/sweep (once a day)
+  → For each account whose Next Follow-Up Date has passed with no follow-up:
+    → under the nudge cap → push the date +2 business days (re-fires the Slack reminder)
+    → at the cap (2 extra nudges) → clear the date so the account goes quiet
 ```
 
-The interval and the follow-up clock live on the **Account**, so each organization
-gets one interval regardless of how many contacts it has.
+The cadence and the follow-up clock live on the **Account**, so each organization
+gets one schedule regardless of how many contacts it has.
+
+### Follow-up cadence by status
+
+The interval is driven by the account's **Status** column
+(`STAGE_INTERVAL_DAYS` in [`lib/monday.ts`](./lib/monday.ts)):
+
+| Status | Cadence |
+|--------|---------|
+| Prospect, Outreached, In Conversation | last outreach **+14 days** |
+| Checked In, Pitched, Contracting | last outreach **+7 days** |
+| Active Client, Closed, Vendor | **no follow-up** — the date is cleared |
+| _blank / unrecognized_ | **+14 days** (so accounts never silently drop off) |
+
+Follow-up dates always land on a **weekday**, and escalation reminders step forward in
+**business days** (skipping weekends).
 
 ## Monday board setup
 
@@ -38,8 +65,9 @@ gets one interval regardless of how many contacts it has.
 |-----------------------------|-----------------|------------------------------------------------|
 | Contacts                    | Connect boards  | Links each account to its contacts             |
 | Acct Latest Outreach (calc) | Date            | **Written by this service** (max across contacts) |
-| Follow-Up Interval (days)   | Number          | Days between follow-ups, per account           |
-| Next Follow-Up Date         | Date            | **Written by this service**                    |
+| Status                      | Status          | Relationship stage — drives the follow-up cadence (see table above) |
+| Next Follow-Up Date         | Date            | **Written by this service**; watched by the Slack automation |
+| Reminder Count (auto)       | Number          | **Managed by the sweep** — escalation counter. Don't edit by hand (you can hide it). |
 
 > Monday's built-in account "Latest Outreach Date" mirror is read-only and can't
 > produce a single most-recent value, so the service maintains its own writable
@@ -94,7 +122,7 @@ a deployment is live and correctly configured — **before** sending a test emai
   "status": "ok",
   "signatureVerification": "enabled",
   "rollout": { "mode": "guarded", "allowedAccountCount": 1 },
-  "config": { "apiToken": true, "accountsBoardId": true, "contactOutreachDate": true, "...": true }
+  "config": { "apiToken": true, "accountsBoardId": true, "accountStage": true, "accountReminderCount": true, "...": true }
 }
 ```
 
@@ -105,7 +133,13 @@ settings. No secrets or IDs are exposed.
 ### 5. Deploy
 
 Deploy to any Node host (e.g. Vercel: `npx vercel`). Set the same environment
-variables in your host's dashboard.
+variables in your host's dashboard, and add a **`CRON_SECRET`** (any random string) —
+it protects the daily sweep endpoint.
+
+On Vercel, [`vercel.json`](./vercel.json) registers the daily cron automatically
+(`/api/cron/sweep` at 13:00 UTC) and Vercel sends `Authorization: Bearer $CRON_SECRET`
+with each invocation. On another host, point any scheduler (GitHub Actions,
+cron-job.org, …) at `GET /api/cron/sweep` once a day with that same bearer header.
 
 ### 6. Register the webhook in Monday
 
@@ -122,8 +156,14 @@ Monday sends a challenge to verify the endpoint — the service echoes it automa
 On your **Accounts** board → **Automate → Create custom automation**:
 
 - Trigger: **When Next Follow-Up Date arrives**
-- Action 1: **Send Slack notification** → your channel
-- Action 2: **Set Next Follow-Up Date to blank** (prevents re-firing)
+- Action: **Send Slack notification** → `#client-outreach` (mention the **Owner**
+  column as a token to @-ping the account owner; the ping resolves when the owner's
+  Monday email matches their Slack email)
+
+> **Keep this automation Slack-only — do not add a "set date" or "clear date" action.**
+> The service owns the Next Follow-Up Date lifecycle: the webhook sets it, and the
+> daily sweep advances it (re-firing this reminder) and clears it after the escalation
+> cap. A date-mutating action here would fight the sweep.
 
 ## Security: webhook signature verification
 
@@ -146,9 +186,20 @@ HMAC-SHA256, so it isn't vulnerable to JWT algorithm-confusion attacks.
 specific accounts while you test against the live board. Leave it **empty to act on
 all accounts**. Any account not on a non-empty list is ignored with no writes.
 
-## Default interval
+## Escalation (the daily sweep)
 
-If an account has no Follow-Up Interval set, the service defaults to **30 days**.
+`GET /api/cron/sweep` runs once a day and chases follow-ups nobody acted on. For each
+account whose Next Follow-Up Date is **strictly in the past** (acting only on past
+dates means it never races Monday's own same-day reminder):
+
+- **Under the cap** (`MAX_ESCALATIONS` = 2 in `lib/monday.ts`) → push the date forward
+  **2 business days** and increment the *Reminder Count (auto)* column. Monday's
+  "when date arrives" recipe fires the Slack nudge again on the new date.
+- **At the cap** → clear the date and reset the counter, so the account goes quiet
+  until someone is contacted again (which restarts the whole cycle via the webhook).
+
+The result is three nudges — on the due date, +2 business days, and +2 more — then
+silence. The endpoint is protected by `CRON_SECRET` (see Deploy).
 
 ## Configuration reference
 

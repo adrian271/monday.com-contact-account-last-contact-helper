@@ -1,12 +1,12 @@
 # Why Per-Account Follow-Up Reminders Need a Little Extra Help
 
-Monday.com's built-in automations are great for straightforward rules — "when this happens, do that." But our follow-up reminder system has two wrinkles that put it just outside what Monday can handle on its own.
+Monday.com's built-in automations are great for straightforward rules — "when this happens, do that." But our follow-up reminder system has a few wrinkles that put it just outside what Monday can handle on its own.
 
 ---
 
 ## The goal
 
-We want each **account** (organization) to have its own follow-up window. One account might need outreach every 30 days, another every 90. When anyone at that account is contacted, the clock resets and a reminder fires at the right time for _that specific account_.
+We want each **account** (organization) to have its own follow-up window, and that window should depend on **how warm the relationship is**. A cold prospect doesn't need chasing as often as someone we're actively pitching. When anyone at that account is contacted, the clock resets and a reminder fires at the right time for _that specific account_ — and if nobody acts on the reminder, it nudges again a couple more times before going quiet.
 
 ---
 
@@ -18,9 +18,9 @@ Monday automations work with **fixed values**. You can tell it:
 
 But you can't tell it:
 
-> "When a date is set, schedule a reminder for however many days _this particular account's row_ says."
+> "When a date is set, schedule a reminder for however many days _this particular account's stage_ calls for."
 
-Monday can read a number stored on a row, but it can't use that number as part of a date calculation on the fly. The interval has to be hardcoded into the automation — one fixed number for every account, no exceptions.
+We drive the interval off the account's **Status** — Prospect/Outreached/In Conversation get a 14-day cadence, Checked In/Pitched/Contracting get 7 days, and stages like Active Client/Closed/Vendor get no automated follow-up at all. Monday can read a row's status, but it can't turn that into "add N days to this date" on the fly. The interval would have to be hardcoded into the automation — one fixed number for every account, no exceptions.
 
 ---
 
@@ -37,19 +37,29 @@ Monday's mirror columns can show a contact field up at the account level, but a 
 
 ---
 
+## Wrinkle 3: Business-day escalation that knows when to stop
+
+A single reminder is easy. What we actually want is:
+
+> Nudge on the due date. If nobody follows up, nudge again 2 **business days** later. Then once more, 2 business days after that. Then stop.
+
+Monday can't do this natively. Its date math counts calendar days (so "+2 days" from a Thursday lands on a weekend), and it has no clean way to count "how many times have I nudged about this?" and stop after two. Left to its own devices it would either ping people on Saturdays or nag forever.
+
+---
+
 ## What we built
 
 A small background service sits alongside Monday and handles just the pieces Monday can't:
 
-When a contact is reached out to and their outreach date updates, the service wakes up and:
+**When a contact is reached out to** (their outreach date updates), the service wakes up and:
 
 1. Finds the **account** that contact belongs to.
 2. Looks at **every contact** on that account and takes the **most recent** outreach date — the account's true "last contacted."
-3. Reads **that account's own interval**, adds it to the most-recent date, and writes the result back as the account's **Next Follow-Up Date**.
+3. Reads **that account's Status**, maps it to an interval, adds it to the most-recent date (landing on a weekday), and writes the account's **Next Follow-Up Date**. Accounts in a no-follow-up stage have their date cleared instead.
 
-From there, Monday takes over and handles the reminder and Slack notification natively — it just needed someone to do the roll-up and the math first.
+**Once a day**, a scheduled sweep looks for accounts whose follow-up date has passed without anyone acting, and walks them through the escalation: push the date forward 2 business days (re-arming Monday's reminder), up to twice, then clear it so the account goes quiet until the next real contact.
 
-Think of it as a calculator-plus-roll-up that Monday can call on whenever it needs something more dynamic than its built-in automations allow.
+From there, Monday takes over and sends the Slack notification natively — it just needed someone to do the roll-up, the stage-aware math, and the business-day escalation first.
 
 ---
 

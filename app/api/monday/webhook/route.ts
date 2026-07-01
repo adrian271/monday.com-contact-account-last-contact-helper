@@ -4,11 +4,14 @@ import {
   ALLOWED_ACCOUNT_IDS,
   COLUMN_IDS,
   addDaysUTC,
+  clearAccountDate,
   findLinkedAccountId,
   isAccountAllowed,
-  readAccountIntervalDays,
+  nextBusinessDay,
+  readAccountInterval,
   rollUpAccountOutreach,
   writeAccountDate,
+  writeAccountNumber,
 } from '@/lib/monday';
 import { MONDAY_SIGNING_SECRET, verifyMondaySignature } from '@/lib/auth';
 
@@ -37,8 +40,9 @@ export async function GET() {
       contactAccountLink: configured(COLUMN_IDS.contactAccountLink),
       accountContactsLink: configured(COLUMN_IDS.accountContactsLink),
       accountLatestOutreach: configured(COLUMN_IDS.accountLatestOutreach),
-      accountInterval: configured(COLUMN_IDS.accountInterval),
+      accountStage: configured(COLUMN_IDS.accountStage),
       accountNextFollowUp: configured(COLUMN_IDS.accountNextFollowUp),
+      accountReminderCount: configured(COLUMN_IDS.accountReminderCount),
     },
   });
 }
@@ -106,10 +110,31 @@ export async function POST(req: NextRequest) {
     }
     await writeAccountDate(accountId, COLUMN_IDS.accountLatestOutreach, latestOutreach);
 
-    // 3. Account interval -> Next Follow-Up Date.
-    const intervalDays = await readAccountIntervalDays(accountId);
-    const nextFollowUp = addDaysUTC(latestOutreach, intervalDays);
+    // 3. Status-driven cadence -> Next Follow-Up Date.
+    const intervalDays = await readAccountInterval(accountId);
+
+    // A null interval means a no-follow-up stage (Active Client / Closed / Vendor):
+    // clear any stale follow-up date so the account stops nagging.
+    if (intervalDays === null) {
+      await clearAccountDate(accountId, COLUMN_IDS.accountNextFollowUp);
+      await writeAccountNumber(accountId, COLUMN_IDS.accountReminderCount, 0);
+      console.log(
+        `[monday-webhook] Account ${accountId}: latestOutreach=${latestOutreach}, stage=no-follow-up, cleared Next Follow-Up Date`
+      );
+      return NextResponse.json({
+        status: 'ok',
+        accountId,
+        latestOutreach,
+        intervalDays: null,
+        nextFollowUp: null,
+      });
+    }
+
+    // Land the follow-up on a weekday, and reset the escalation counter — this
+    // contact event starts a fresh follow-up cycle.
+    const nextFollowUp = nextBusinessDay(addDaysUTC(latestOutreach, intervalDays));
     await writeAccountDate(accountId, COLUMN_IDS.accountNextFollowUp, nextFollowUp);
+    await writeAccountNumber(accountId, COLUMN_IDS.accountReminderCount, 0);
 
     console.log(
       `[monday-webhook] Account ${accountId}: latestOutreach=${latestOutreach}, interval=${intervalDays}, nextFollowUp=${nextFollowUp}`
