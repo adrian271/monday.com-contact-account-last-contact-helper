@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deployment Checklist — Monday Follow-Up Service</title>
+<style>
+  :root {
+    --bg: #0f1523;
+    --panel: #182033;
+    --panel-2: #1f2942;
+    --border: #2b3652;
+    --text: #e6ebf5;
+    --muted: #94a3b8;
+    --accent: #35c2a5;
+    --accent-dim: #1c5c50;
+    --warn: #f5b544;
+    --warn-bg: #3a2f16;
+    --danger: #f47174;
+    --danger-bg: #3a1f21;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+    padding: 40px 20px 80px;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  header h1 { font-size: 26px; margin: 0 0 6px; }
+  header p { color: var(--muted); margin: 0 0 24px; }
+
+  .progress-shell {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--bg); padding: 12px 0 16px; margin-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .bar { height: 10px; background: var(--panel-2); border-radius: 6px; overflow: hidden; }
+  .bar > span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s ease; }
+  .bar-label { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .reset { background: none; border: 1px solid var(--border); color: var(--muted); font-size: 12px;
+           padding: 3px 10px; border-radius: 6px; cursor: pointer; }
+  .reset:hover { color: var(--text); border-color: var(--muted); }
+
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin: 18px 0; }
+  section > h2 { font-size: 17px; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; }
+  section > .sub { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+  .num { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px;
+         background: var(--accent-dim); color: var(--accent); border-radius: 50%; font-size: 13px; font-weight: 700; flex: none; }
+
+  ul.checks { list-style: none; margin: 0; padding: 0; }
+  ul.checks li { display: flex; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border); align-items: flex-start; }
+  ul.checks li:first-child { border-top: none; }
+  ul.checks input[type=checkbox] { margin-top: 4px; width: 18px; height: 18px; accent-color: var(--accent); flex: none; cursor: pointer; }
+  ul.checks label { cursor: pointer; }
+  ul.checks .done label { color: var(--muted); text-decoration: line-through; }
+  code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; font-size: 13px;
+         font-family: "SF Mono", Menlo, Consolas, monospace; color: #9fdccd; }
+  .hint { display: block; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+
+  .callout { border-radius: 10px; padding: 12px 14px; margin: 14px 0; font-size: 13.5px; }
+  .callout strong { display: block; margin-bottom: 2px; }
+  .warn { background: var(--warn-bg); border: 1px solid #5c4a1e; }
+  .warn strong { color: var(--warn); }
+  .danger { background: var(--danger-bg); border: 1px solid #5c2a2c; }
+  .danger strong { color: var(--danger); }
+
+  table.env { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 13px; }
+  table.env th, table.env td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.env th { color: var(--muted); font-weight: 600; }
+  table.env code { white-space: nowrap; }
+  .tag { font-size: 11px; padding: 1px 7px; border-radius: 20px; white-space: nowrap; }
+  .tag.req { background: var(--accent-dim); color: var(--accent); }
+  .tag.opt { background: #33405e; color: #a9b8d6; }
+  footer { color: var(--muted); font-size: 12.5px; text-align: center; margin-top: 30px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🚀 Deployment Checklist</h1>
+    <p>Monday Account-Level Follow-Up Service → Vercel. Your progress saves automatically in this browser.</p>
+  </header>
+
+  <div class="progress-shell">
+    <div class="bar-label"><span id="count">0 of 0 complete</span><button class="reset" onclick="resetAll()">Reset</button></div>
+    <div class="bar"><span id="fill"></span></div>
+  </div>
+
+  <div class="callout danger">
+    <strong>Before anything: never commit secrets</strong>
+    <code>.env.local</code> holds your live API token and is gitignored — confirm it's not staged
+    (<code>git status --porcelain | grep .env.local</code> should print nothing). If the token ever lands in git
+    history, rotate it in Monday (Administration → API).
+  </div>
+
+  <!-- 1 -->
+  <section>
+    <h2><span class="num">1</span> Prep the repo</h2>
+    <p class="sub">Get the code into a Git host Vercel can import.</p>
+    <ul class="checks">
+      <li><input type="checkbox"><label><code>git init</code>, commit, and push to GitHub (or GitLab/Bitbucket)
+        <span class="hint">Confirm <code>.env.local</code> is NOT in the commit — only <code>.env.local.example</code> should be tracked.</span></label></li>
+      <li><input type="checkbox"><label>Generate a <code>CRON_SECRET</code>
+        <span class="hint">Any random string, e.g. <code>openssl rand -hex 32</code>. You'll paste it into Vercel in step 3.</span></label></li>
+      <li><input type="checkbox"><label>Run <code>npm run build</code> locally once to confirm it compiles clean</label></li>
+    </ul>
+  </section>
+
+  <!-- 2 -->
+  <section>
+    <h2><span class="num">2</span> Create the Vercel project</h2>
+    <p class="sub">Import the repo — Next.js is auto-detected, no build config needed.</p>
+    <ul class="checks">
+      <li><input type="checkbox"><label>In Vercel → <em>Add New → Project</em> → import your repo</label></li>
+      <li><input type="checkbox"><label>Framework preset shows <strong>Next.js</strong> (leave build/output settings default)</label></li>
+      <li><input type="checkbox"><label>Don't deploy yet — add env vars first (step 3)</label></li>
+    </ul>
+  </section>
+
+  <!-- 3 -->
+  <section>
+    <h2><span class="num">3</span> Set environment variables</h2>
+    <p class="sub">Vercel → Project → <em>Settings → Environment Variables</em>. Copy each <strong>value</strong> from your local <code>.env.local</code> — don't retype IDs by hand.</p>
+    <table class="env">
+      <tr><th>Variable</th><th></th><th>Notes</th></tr>
+      <tr><td><code>MONDAY_API_TOKEN</code></td><td><span class="tag req">required</span></td><td>Your live token (secret)</td></tr>
+      <tr><td><code>CRON_SECRET</code></td><td><span class="tag req">required</span></td><td>The random string from step 1 — protects the sweep endpoint</td></tr>
+      <tr><td><code>MONDAY_ACCOUNTS_BOARD_ID</code></td><td><span class="tag req">required</span></td><td>Accounts board</td></tr>
+      <tr><td><code>MONDAY_OUTREACH_DATE_COLUMN_ID</code></td><td><span class="tag req">required</span></td><td>Contact Latest Outreach Date</td></tr>
+      <tr><td><code>MONDAY_CONTACT_ACCOUNT_LINK_COLUMN_ID</code></td><td><span class="tag req">required</span></td><td>Contact → Account link</td></tr>
+      <tr><td><code>MONDAY_ACCOUNT_CONTACTS_LINK_COLUMN_ID</code></td><td><span class="tag req">required</span></td><td>Account → Contacts link</td></tr>
+      <tr><td><code>MONDAY_ACCOUNT_LATEST_OUTREACH_COLUMN_ID</code></td><td><span class="tag req">required</span></td><td>Acct Latest Outreach (calc)</td></tr>
+      <tr><td><code>MONDAY_ACCOUNT_STAGE_COLUMN_ID</code></td><td><span class="tag req">required</span></td><td>Status column (drives cadence)</td></tr>
+      <tr><td><code>MONDAY_ACCOUNT_NEXT_FOLLOWUP_COLUMN_ID</code></td><td><span class="tag req">required</span></td><td>Next Follow-Up Date</td></tr>
+      <tr><td><code>MONDAY_REMINDER_COUNT_COLUMN_ID</code></td><td><span class="tag req">required</span></td><td>Reminder Count (auto)</td></tr>
+      <tr><td><code>MONDAY_ALLOWED_ACCOUNT_IDS</code></td><td><span class="tag req">required</span></td><td>Keep the test account only for now; widen later (step 6)</td></tr>
+      <tr><td><code>MONDAY_SIGNING_SECRET</code></td><td><span class="tag opt">optional</span></td><td>Leave empty — the basic Webhooks integration sends no signature</td></tr>
+      <tr><td><code>MONDAY_CONTACTS_BOARD_ID</code></td><td><span class="tag opt">optional</span></td><td>Not used at runtime; harmless to include</td></tr>
+    </table>
+    <ul class="checks" style="margin-top:14px">
+      <li><input type="checkbox"><label>All <strong>required</strong> variables added (Production + Preview environments)</label></li>
+      <li><input type="checkbox"><label><code>MONDAY_ALLOWED_ACCOUNT_IDS</code> still limited to the test account</label></li>
+    </ul>
+  </section>
+
+  <!-- 4 -->
+  <section>
+    <h2><span class="num">4</span> Deploy &amp; verify</h2>
+    <p class="sub">Ship it, then confirm the endpoint and the cron registered.</p>
+    <ul class="checks">
+      <li><input type="checkbox"><label>Trigger the deploy; wait for a green build</label></li>
+      <li><input type="checkbox"><label>Open <code>https://YOUR-APP.vercel.app/api/monday/webhook</code> in a browser
+        <span class="hint">Health check should show <code>"status":"ok"</code> and every <code>config</code> flag <code>true</code>. Any <code>false</code> = a missing env var.</span></label></li>
+      <li><input type="checkbox"><label>Vercel → <em>Settings → Cron Jobs</em> lists <code>/api/cron/sweep</code> (daily, 13:00 UTC)
+        <span class="hint">Registered automatically from <code>vercel.json</code>.</span></label></li>
+    </ul>
+    <div class="callout warn">
+      <strong>Vercel Hobby is non-commercial</strong>
+      Daily cron fits the free tier, but Hobby's terms are for personal use. For a real client-outreach tool,
+      use Pro — or keep the app on Hobby and trigger <code>/api/cron/sweep</code> from a free external scheduler
+      (GitHub Actions / cron-job.org) with the <code>Authorization: Bearer &lt;CRON_SECRET&gt;</code> header.
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section>
+    <h2><span class="num">5</span> Point Monday at the stable URL</h2>
+    <p class="sub">Swap the temporary tunnel URL for the Vercel one.</p>
+    <ul class="checks">
+      <li><input type="checkbox"><label>Contacts board → <em>Integrate → Webhooks</em> → set URL to
+        <code>https://YOUR-APP.vercel.app/api/monday/webhook</code>
+        <span class="hint">Full path, no trailing slash. Event = <em>column value changed</em>, column = Latest Outreach Date.</span></label></li>
+      <li><input type="checkbox"><label>Monday accepts it (the challenge handshake succeeds automatically)</label></li>
+      <li><input type="checkbox"><label>Delete any old <code>trycloudflare.com</code> webhook so it doesn't double-fire</label></li>
+      <li><input type="checkbox"><label>Confirm the Slack automation is <strong>On</strong> and still Slack-only (no date actions)</label></li>
+    </ul>
+  </section>
+
+  <!-- 6 -->
+  <section>
+    <h2><span class="num">6</span> Smoke test, then widen the rollout</h2>
+    <p class="sub">Prove it on the test account before letting it touch every account.</p>
+    <ul class="checks">
+      <li><input type="checkbox"><label>Change the test contact's Latest Outreach Date → the account's Next Follow-Up Date updates (status-based cadence)</label></li>
+      <li><input type="checkbox"><label>Set the account's Next Follow-Up Date to a past weekday → next day's sweep pushes it +2 business days &amp; bumps Reminder Count</label></li>
+      <li><input type="checkbox"><label>Slack message lands in <code>#client-outreach</code> and @-mentions the owner</label></li>
+      <li><input type="checkbox"><label>When confident, clear <code>MONDAY_ALLOWED_ACCOUNT_IDS</code> (empty = all accounts) &amp; redeploy</label></li>
+    </ul>
+  </section>
+
+  <footer>Generated for the Monday Account-Level Follow-Up Service · check items off as you go</footer>
+</div>
+
+<script>
+  const KEY = "monday-deploy-checklist-v1";
+  const boxes = [...document.querySelectorAll('ul.checks input[type=checkbox]')];
+  boxes.forEach((b, i) => b.dataset.i = i);
+
+  function save() {
+    localStorage.setItem(KEY, JSON.stringify(boxes.map(b => b.checked)));
+  }
+  function render() {
+    const done = boxes.filter(b => b.checked).length;
+    const total = boxes.length;
+    document.getElementById('count').textContent = `${done} of ${total} complete`;
+    document.getElementById('fill').style.width = total ? (done / total * 100) + '%' : '0';
+    boxes.forEach(b => b.closest('li').classList.toggle('done', b.checked));
+  }
+  function load() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(KEY) || '[]');
+      boxes.forEach((b, i) => { if (saved[i]) b.checked = true; });
+    } catch (e) {}
+    render();
+  }
+  function resetAll() {
+    boxes.forEach(b => b.checked = false);
+    save(); render();
+  }
+  boxes.forEach(b => b.addEventListener('change', () => { save(); render(); }));
+  load();
+</script>
+</body>
+</html>
