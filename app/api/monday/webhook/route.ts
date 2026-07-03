@@ -3,15 +3,18 @@ import {
   ACCOUNTS_BOARD_ID,
   ALLOWED_ACCOUNT_IDS,
   COLUMN_IDS,
+  INTERNAL_ACCOUNT_ID,
   addDaysUTC,
   clearAccountDate,
   findLinkedAccountId,
   isAccountAllowed,
   nextBusinessDay,
   readAccountInterval,
+  resolveOwnerSlackHandle,
   rollUpAccountOutreach,
   writeAccountDate,
   writeAccountNumber,
+  writeAccountText,
 } from '@/lib/monday';
 import { MONDAY_SIGNING_SECRET, verifyMondaySignature } from '@/lib/auth';
 
@@ -43,6 +46,10 @@ export async function GET() {
       accountStage: configured(COLUMN_IDS.accountStage),
       accountNextFollowUp: configured(COLUMN_IDS.accountNextFollowUp),
       accountReminderCount: configured(COLUMN_IDS.accountReminderCount),
+      accountOwner: configured(COLUMN_IDS.accountOwner),
+      accountPersonToSlack: configured(COLUMN_IDS.accountPersonToSlack),
+      contactSlackHandle: configured(COLUMN_IDS.contactSlackHandle),
+      internalAccountId: configured(INTERNAL_ACCOUNT_ID),
     },
   });
 }
@@ -136,8 +143,19 @@ export async function POST(req: NextRequest) {
     await writeAccountDate(accountId, COLUMN_IDS.accountNextFollowUp, nextFollowUp);
     await writeAccountNumber(accountId, COLUMN_IDS.accountReminderCount, 0);
 
+    // Stamp the owner's Slack handle (looked up from the 10/10 Research roster)
+    // onto the account so the Monday -> Slack automation can @mention them. A
+    // failure here must not undo the follow-up date, so it's isolated.
+    let ownerHandle = '';
+    try {
+      ownerHandle = await resolveOwnerSlackHandle(accountId);
+      await writeAccountText(accountId, COLUMN_IDS.accountPersonToSlack, ownerHandle);
+    } catch (e) {
+      console.warn(`[monday-webhook] Owner Slack handle resolution failed for ${accountId}:`, e);
+    }
+
     console.log(
-      `[monday-webhook] Account ${accountId}: latestOutreach=${latestOutreach}, interval=${intervalDays}, nextFollowUp=${nextFollowUp}`
+      `[monday-webhook] Account ${accountId}: latestOutreach=${latestOutreach}, interval=${intervalDays}, nextFollowUp=${nextFollowUp}, ownerHandle=${ownerHandle || '(none)'}`
     );
 
     return NextResponse.json({
@@ -146,6 +164,7 @@ export async function POST(req: NextRequest) {
       latestOutreach,
       intervalDays,
       nextFollowUp,
+      ownerHandle: ownerHandle || null,
     });
   } catch (err) {
     console.error('[monday-webhook] Error processing webhook:', err);

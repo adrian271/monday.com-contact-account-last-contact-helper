@@ -23,6 +23,8 @@ Contact reached out to → Monday stamps the contact's Latest Outreach Date
   → Writes it to the account's "Acct Latest Outreach (calc)" column
   → Reads the account's Status → maps it to an interval → adds it (landing on a weekday)
     → account Next Follow-Up Date (and resets the escalation counter)
+  → Resolves the account Owner → looks up their Slack handle in the team roster
+    → writes it to the account's "Person to Slack" column (so the reminder can @mention them)
   → Monday native automation: when Next Follow-Up Date arrives → Slack notification
 
 # Daily (cron sweep)
@@ -58,20 +60,44 @@ Follow-up dates always land on a **weekday**, and escalation reminders step forw
 |-----------------------|-----------------|-----------------------------------------|
 | Latest Outreach Date  | Date            | Stamped when a contact is reached out to |
 | Account               | Connect boards  | Links each contact to its Account        |
+| Slack Handle          | Text            | Each team member's Slack handle (e.g. `@jenna`) — read for the owner roster (see below) |
 
 **Accounts board** — holds the per-account follow-up state:
 
 | Column                      | Type            | Notes                                          |
 |-----------------------------|-----------------|------------------------------------------------|
 | Contacts                    | Connect boards  | Links each account to its contacts             |
+| Owner                       | People          | The account owner — matched **by name** to the team roster to find their Slack handle |
 | Acct Latest Outreach (calc) | Date            | **Written by this service** (max across contacts) |
 | Status                      | Status          | Relationship stage — drives the follow-up cadence (see table above) |
 | Next Follow-Up Date         | Date            | **Written by this service**; watched by the Slack automation |
+| Person to Slack             | Text            | **Written by this service** — the owner's resolved Slack handle, used by the reminder to @mention them |
 | Reminder Count (auto)       | Number          | **Managed by the sweep** — escalation counter. Don't edit by hand (you can hide it). |
 
 > Monday's built-in account "Latest Outreach Date" mirror is read-only and can't
 > produce a single most-recent value, so the service maintains its own writable
 > "Acct Latest Outreach (calc)" date column instead.
+
+### Owner → Slack handle (the roster)
+
+The reminder should @mention **whoever owns the account**, dynamically. Monday's
+Slack "send message" action can't mention a people column directly, and Monday user
+profiles don't expose a Slack handle — so the service resolves it from your own data:
+
+1. Your internal team members each have a **contact row** under one dedicated
+   "team" account (for 10/10 Research, the account of the same name — set its ID as
+   `MONDAY_INTERNAL_ACCOUNT_ID`), with their **Slack Handle** column filled.
+2. On each webhook, the service reads the account's **Owner**, matches the owner's
+   name against that roster (case-insensitive; trailing credentials like `, PhD` are
+   ignored), and writes the matched **Slack Handle** into **Person to Slack**.
+3. The Slack automation's message uses the **`{Person to Slack}`** token, which
+   outputs e.g. `@jenna` — Slack renders it as a real ping.
+
+**Maintenance:** when a new person can own accounts, add them once as a contact under
+the team account with their Slack Handle — no code or config change. An owner with no
+matching roster entry (or a blank handle) resolves to an empty Person to Slack, so the
+reminder simply posts without a ping (safe). Matching is **by name**, so an owner's
+Monday display name must match their roster contact name.
 
 ## Setup
 
@@ -156,9 +182,14 @@ Monday sends a challenge to verify the endpoint — the service echoes it automa
 On your **Accounts** board → **Automate → Create custom automation**:
 
 - Trigger: **When Next Follow-Up Date arrives**
-- Action: **Send Slack notification** → `#client-outreach` (mention the **Owner**
-  column as a token to @-ping the account owner; the ping resolves when the owner's
-  Monday email matches their Slack email)
+- Action: **Send Slack notification** → `#client-outreach`, and include the
+  **`{Person to Slack}`** column as a token in the message to @-ping the account owner,
+  e.g. `{Person to Slack} — {Account's Name} is due for outreach`. The service keeps
+  `Person to Slack` populated with the owner's handle (see [the roster](#owner--slack-handle-the-roster)).
+
+> Don't try to @-mention the **Owner** people column directly — Monday's Slack action
+> only substitutes it as plain text (the person's name), which Slack won't turn into a
+> ping. The `{Person to Slack}` handle is what resolves to an actual mention.
 
 > **Keep this automation Slack-only — do not add a "set date" or "clear date" action.**
 > The service owns the Next Follow-Up Date lifecycle: the webhook sets it, and the

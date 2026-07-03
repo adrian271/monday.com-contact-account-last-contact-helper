@@ -12,15 +12,24 @@ const MONDAY_API_TOKEN = process.env.MONDAY_API_TOKEN!;
 // .env.local.example). Find IDs via the test script: `npm run monday:test`.
 export const ACCOUNTS_BOARD_ID = process.env.MONDAY_ACCOUNTS_BOARD_ID || 'YOUR_ACCOUNTS_BOARD_ID';
 
+// The internal "10/10 Research" account. Its linked contacts are the team roster
+// we look up owner Slack handles from (owner name -> contact's Slack Handle).
+export const INTERNAL_ACCOUNT_ID = process.env.MONDAY_INTERNAL_ACCOUNT_ID || 'YOUR_INTERNAL_ACCOUNT_ID';
+
 export const COLUMN_IDS = {
   // Contacts board
   contactOutreachDate: process.env.MONDAY_OUTREACH_DATE_COLUMN_ID || 'YOUR_CONTACT_OUTREACH_DATE_COLUMN_ID',
   contactAccountLink: process.env.MONDAY_CONTACT_ACCOUNT_LINK_COLUMN_ID || 'YOUR_CONTACT_ACCOUNT_LINK_COLUMN_ID',
+  contactSlackHandle: process.env.MONDAY_CONTACT_SLACK_HANDLE_COLUMN_ID || 'YOUR_CONTACT_SLACK_HANDLE_COLUMN_ID',
   // Accounts board
   accountContactsLink: process.env.MONDAY_ACCOUNT_CONTACTS_LINK_COLUMN_ID || 'YOUR_ACCOUNT_CONTACTS_LINK_COLUMN_ID',
   accountLatestOutreach: process.env.MONDAY_ACCOUNT_LATEST_OUTREACH_COLUMN_ID || 'YOUR_ACCOUNT_LATEST_OUTREACH_COLUMN_ID',
   accountStage: process.env.MONDAY_ACCOUNT_STAGE_COLUMN_ID || 'YOUR_ACCOUNT_STAGE_COLUMN_ID',
   accountNextFollowUp: process.env.MONDAY_ACCOUNT_NEXT_FOLLOWUP_COLUMN_ID || 'YOUR_ACCOUNT_NEXT_FOLLOWUP_COLUMN_ID',
+  accountOwner: process.env.MONDAY_ACCOUNT_OWNER_COLUMN_ID || 'YOUR_ACCOUNT_OWNER_COLUMN_ID',
+  // Text column this service writes the owner's Slack handle into, so the Monday ->
+  // Slack automation can @mention them via a {Person to Slack} token.
+  accountPersonToSlack: process.env.MONDAY_ACCOUNT_PERSON_TO_SLACK_COLUMN_ID || 'YOUR_ACCOUNT_PERSON_TO_SLACK_COLUMN_ID',
   // Number column tracking how many escalation nudges have been sent for the
   // current follow-up cycle. The daily sweep reads/increments it and stops after
   // MAX_ESCALATIONS; the webhook resets it to 0 when a fresh contact restarts the cycle.
@@ -210,6 +219,84 @@ export async function writeAccountNumber(accountId: string, columnId: string, n:
      }`,
     { boardId: ACCOUNTS_BOARD_ID, itemId: accountId }
   );
+}
+
+// Write a plain-text column (used for the resolved owner Slack handle).
+export async function writeAccountText(accountId: string, columnId: string, text: string) {
+  await mondayRequest(
+    `mutation ($boardId: ID!, $itemId: ID!, $value: String!) {
+       change_simple_column_value(board_id: $boardId, item_id: $itemId, column_id: "${columnId}", value: $value) { id }
+     }`,
+    { boardId: ACCOUNTS_BOARD_ID, itemId: accountId, value: text }
+  );
+}
+
+// --- Owner Slack handle resolution -------------------------------------------
+
+// Normalize a person name for matching: lowercase, drop trailing credentials
+// after a comma (e.g. "Tara Weatherholt, PhD" -> "tara weatherholt"), collapse
+// whitespace. Owner (Monday user) names and internal contact names are matched
+// on this normalized form since the internal contacts have no email to key on.
+function normalizeName(name: string): string {
+  return name.toLowerCase().replace(/,.*$/, '').replace(/\s+/g, ' ').trim();
+}
+
+// The account's Owner (people column) display name — first owner if several, '' if none.
+export async function readAccountOwnerName(accountId: string): Promise<string> {
+  const data = await mondayRequest(
+    `query ($itemId: [ID!]) {
+       items(ids: $itemId) {
+         column_values(ids: ["${COLUMN_IDS.accountOwner}"]) { text }
+       }
+     }`,
+    { itemId: [accountId] }
+  );
+  const text = (data?.items?.[0]?.column_values?.[0]?.text ?? '').trim();
+  return text ? text.split(',')[0].trim() : '';
+}
+
+// Build a map of internal team member name -> Slack handle, from the contacts
+// linked to the 10/10 Research account. Only entries with a handle are included.
+export async function fetchInternalSlackRoster(): Promise<Record<string, string>> {
+  const acct = await mondayRequest(
+    `query ($itemId: [ID!]) {
+       items(ids: $itemId) {
+         column_values(ids: ["${COLUMN_IDS.accountContactsLink}"]) {
+           ... on BoardRelationValue { linked_item_ids }
+         }
+       }
+     }`,
+    { itemId: [INTERNAL_ACCOUNT_ID] }
+  );
+  const ids: string[] = acct?.items?.[0]?.column_values?.[0]?.linked_item_ids ?? [];
+  if (ids.length === 0) return {};
+
+  const contacts = await mondayRequest(
+    `query ($ids: [ID!]) {
+       items(ids: $ids) {
+         name
+         column_values(ids: ["${COLUMN_IDS.contactSlackHandle}"]) { text }
+       }
+     }`,
+    { ids }
+  );
+
+  const roster: Record<string, string> = {};
+  for (const c of contacts?.items ?? []) {
+    const handle = (c.column_values?.[0]?.text ?? '').trim();
+    if (handle) roster[normalizeName(c.name)] = handle;
+  }
+  return roster;
+}
+
+// Resolve the account owner's Slack handle by matching the owner's name against
+// the internal team roster. Returns '' when there's no owner, no matching roster
+// entry, or that member has no handle set (all safe "no ping" cases).
+export async function resolveOwnerSlackHandle(accountId: string): Promise<string> {
+  const ownerName = await readAccountOwnerName(accountId);
+  if (!ownerName) return '';
+  const roster = await fetchInternalSlackRoster();
+  return roster[normalizeName(ownerName)] ?? '';
 }
 
 // --- Escalation sweep --------------------------------------------------------

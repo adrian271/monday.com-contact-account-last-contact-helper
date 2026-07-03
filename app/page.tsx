@@ -54,7 +54,13 @@ export default function Home() {
           weekday, and resets the escalation counter.
         </li>
         <li>
-          Monday&rsquo;s native automation sends the Slack reminder when that date arrives.
+          It resolves the account&rsquo;s <strong>Owner</strong> to their Slack handle (via the
+          team roster) and writes it to <strong>Person to Slack</strong>, so the reminder can
+          @mention the right person.
+        </li>
+        <li>
+          Monday&rsquo;s native automation sends the Slack reminder to{' '}
+          <strong>#client-outreach</strong> when that date arrives, pinging the owner.
         </li>
       </ol>
 
@@ -113,6 +119,28 @@ export default function Home() {
         <code>GET /api/cron/sweep</code> (Vercel Cron, 13:00 UTC); Monday still sends the Slack
         message each time the date lands.
       </p>
+
+      <h2>Owner notifications</h2>
+      <p>
+        The reminder @mentions whoever <strong>owns</strong> the account. Since Monday can&rsquo;t
+        mention a people column directly, the service keeps a text column,{' '}
+        <strong>Person to Slack</strong>, filled with the owner&rsquo;s Slack handle:
+      </p>
+      <ul>
+        <li>
+          Each team member has a contact row under the internal <strong>team account</strong> with
+          their <strong>Slack Handle</strong> set.
+        </li>
+        <li>
+          On each update, the service matches the account&rsquo;s Owner name to that roster and
+          writes the handle to <strong>Person to Slack</strong>; the Slack message uses the{' '}
+          <code>{'{Person to Slack}'}</code> token to ping them.
+        </li>
+        <li>
+          A new potential owner just needs a roster contact with a Slack Handle &mdash; no code
+          change. An unmatched owner posts without a ping (safe).
+        </li>
+      </ul>
 
       <h2>Status</h2>
       <p>
