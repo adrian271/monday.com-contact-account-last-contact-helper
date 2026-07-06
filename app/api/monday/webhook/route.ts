@@ -21,6 +21,11 @@ import { MONDAY_SIGNING_SECRET, verifyMondaySignature } from '@/lib/auth';
 // crypto-based signature verification requires the Node.js runtime.
 export const runtime = 'nodejs';
 
+// The handler makes ~10 sequential Monday API calls; give it headroom so a slow
+// run isn't killed mid-flow (which would leave the account half-updated). Vercel
+// clamps this to the plan's ceiling.
+export const maxDuration = 60;
+
 // Health check — confirms the deployment is live and reports its configuration
 // state WITHOUT exposing any secrets or actual IDs. Useful before sending a test
 // email: hit GET /api/monday/webhook and check everything reads "configured".
@@ -168,7 +173,11 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     console.error('[monday-webhook] Error processing webhook:', err);
-    // Return 200 so Monday doesn't keep retrying a permanent error.
-    return NextResponse.json({ status: 'error', reason: String(err) }, { status: 200 });
+    // Unexpected failure (e.g. a transient Monday API error or timeout) — return
+    // 500 so Monday RETRIES. The whole flow is idempotent (it recomputes the same
+    // roll-up, dates, and handle), so a retry safely finishes a half-done run
+    // instead of leaving the account stuck. Expected "ignore" outcomes above
+    // return 200 and are never retried.
+    return NextResponse.json({ status: 'error', reason: String(err) }, { status: 500 });
   }
 }
