@@ -5,25 +5,23 @@ import {
   COLUMN_IDS,
   INTERNAL_ACCOUNT_ID,
   addDaysUTC,
-  clearAccountDate,
   findLinkedAccountId,
   isAccountAllowed,
   nextBusinessDay,
   readAccountInterval,
   resolveOwnerSlackHandle,
   rollUpAccountOutreach,
-  writeAccountDate,
-  writeAccountNumber,
-  writeAccountText,
+  writeAccountColumns,
 } from '@/lib/monday';
 import { MONDAY_SIGNING_SECRET, verifyMondaySignature } from '@/lib/auth';
+import { ALERTING_ENABLED, sendFailureAlert } from '@/lib/alert';
 
 // crypto-based signature verification requires the Node.js runtime.
 export const runtime = 'nodejs';
 
-// The handler makes ~10 sequential Monday API calls; give it headroom so a slow
-// run isn't killed mid-flow (which would leave the account half-updated). Vercel
-// clamps this to the plan's ceiling.
+// The handler makes several Monday API calls (three reads in parallel, then one
+// combined write); give it headroom so a slow run isn't killed mid-flow (which
+// would leave the account half-updated). Vercel clamps this to the plan's ceiling.
 export const maxDuration = 60;
 
 // Health check — confirms the deployment is live and reports its configuration
@@ -37,6 +35,7 @@ export async function GET() {
     status: 'ok',
     service: 'monday-account-followup',
     signatureVerification: MONDAY_SIGNING_SECRET ? 'enabled' : 'disabled (set MONDAY_SIGNING_SECRET)',
+    failureAlerts: ALERTING_ENABLED ? 'enabled' : 'disabled (set ALERT_SLACK_BOT_TOKEN + ALERT_SLACK_USER_ID)',
     rollout:
       ALLOWED_ACCOUNT_IDS.length > 0
         ? { mode: 'guarded', allowedAccountCount: ALLOWED_ACCOUNT_IDS.length }
@@ -114,22 +113,34 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ status: 'ignored', reason: 'account not on allowlist', accountId });
     }
 
-    // 2. Roll up the account-wide most-recent outreach across all its contacts.
-    const latestOutreach = await rollUpAccountOutreach(accountId);
+    // 2. The roll-up, the status/interval, and the owner's Slack handle are all
+    // independent reads — run them concurrently to keep well under the time limit.
+    // The handle lookup is allowed to fail on its own (→ '') so it can never undo
+    // the date logic; every other failure propagates to the retry-on-500 catch.
+    const [latestOutreach, intervalDays, ownerHandle] = await Promise.all([
+      rollUpAccountOutreach(accountId),
+      readAccountInterval(accountId),
+      resolveOwnerSlackHandle(accountId).catch((e) => {
+        console.warn(`[monday-webhook] Owner Slack handle resolution failed for ${accountId}:`, e);
+        return '';
+      }),
+    ]);
+
     if (!latestOutreach) {
       console.warn(`[monday-webhook] Account ${accountId} has no contact outreach dates`);
       return NextResponse.json({ status: 'ignored', reason: 'no outreach dates' }, { status: 200 });
     }
-    await writeAccountDate(accountId, COLUMN_IDS.accountLatestOutreach, latestOutreach);
-
-    // 3. Status-driven cadence -> Next Follow-Up Date.
-    const intervalDays = await readAccountInterval(accountId);
 
     // A null interval means a no-follow-up stage (Active Client / Closed / Vendor):
-    // clear any stale follow-up date so the account stops nagging.
+    // roll up the latest outreach + stamp the owner, but clear the follow-up date so
+    // the account stops nagging.
     if (intervalDays === null) {
-      await clearAccountDate(accountId, COLUMN_IDS.accountNextFollowUp);
-      await writeAccountNumber(accountId, COLUMN_IDS.accountReminderCount, 0);
+      await writeAccountColumns(accountId, {
+        [COLUMN_IDS.accountLatestOutreach]: { date: latestOutreach },
+        [COLUMN_IDS.accountNextFollowUp]: {}, // clear
+        [COLUMN_IDS.accountReminderCount]: '0',
+        [COLUMN_IDS.accountPersonToSlack]: ownerHandle,
+      });
       console.log(
         `[monday-webhook] Account ${accountId}: latestOutreach=${latestOutreach}, stage=no-follow-up, cleared Next Follow-Up Date`
       );
@@ -142,22 +153,16 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Land the follow-up on a weekday, and reset the escalation counter — this
-    // contact event starts a fresh follow-up cycle.
+    // Land the follow-up on a weekday, reset the escalation counter (this contact
+    // event starts a fresh cycle), and stamp the owner's Slack handle — all in one
+    // write so the Monday -> Slack automation can @mention them.
     const nextFollowUp = nextBusinessDay(addDaysUTC(latestOutreach, intervalDays));
-    await writeAccountDate(accountId, COLUMN_IDS.accountNextFollowUp, nextFollowUp);
-    await writeAccountNumber(accountId, COLUMN_IDS.accountReminderCount, 0);
-
-    // Stamp the owner's Slack handle (looked up from the 10/10 Research roster)
-    // onto the account so the Monday -> Slack automation can @mention them. A
-    // failure here must not undo the follow-up date, so it's isolated.
-    let ownerHandle = '';
-    try {
-      ownerHandle = await resolveOwnerSlackHandle(accountId);
-      await writeAccountText(accountId, COLUMN_IDS.accountPersonToSlack, ownerHandle);
-    } catch (e) {
-      console.warn(`[monday-webhook] Owner Slack handle resolution failed for ${accountId}:`, e);
-    }
+    await writeAccountColumns(accountId, {
+      [COLUMN_IDS.accountLatestOutreach]: { date: latestOutreach },
+      [COLUMN_IDS.accountNextFollowUp]: { date: nextFollowUp },
+      [COLUMN_IDS.accountReminderCount]: '0',
+      [COLUMN_IDS.accountPersonToSlack]: ownerHandle,
+    });
 
     console.log(
       `[monday-webhook] Account ${accountId}: latestOutreach=${latestOutreach}, interval=${intervalDays}, nextFollowUp=${nextFollowUp}, ownerHandle=${ownerHandle || '(none)'}`
@@ -173,6 +178,7 @@ export async function POST(req: NextRequest) {
     });
   } catch (err) {
     console.error('[monday-webhook] Error processing webhook:', err);
+    await sendFailureAlert(`⚠️ Follow-up *webhook* failed for contact ${contactId}: ${String(err)}`);
     // Unexpected failure (e.g. a transient Monday API error or timeout) — return
     // 500 so Monday RETRIES. The whole flow is idempotent (it recomputes the same
     // roll-up, dates, and handle), so a retry safely finishes a half-done run

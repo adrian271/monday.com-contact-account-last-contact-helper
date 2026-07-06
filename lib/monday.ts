@@ -221,13 +221,16 @@ export async function writeAccountNumber(accountId: string, columnId: string, n:
   );
 }
 
-// Write a plain-text column (used for the resolved owner Slack handle).
-export async function writeAccountText(accountId: string, columnId: string, text: string) {
+// Set several account columns in ONE mutation. `values` maps column id -> value in
+// Monday's column-value JSON form: date columns take `{ date: 'YYYY-MM-DD' }` (or
+// `{}` to clear), text/number columns take a string. Collapsing the per-column
+// writes into a single call keeps the webhook well under the function time limit.
+export async function writeAccountColumns(accountId: string, values: Record<string, unknown>) {
   await mondayRequest(
-    `mutation ($boardId: ID!, $itemId: ID!, $value: String!) {
-       change_simple_column_value(board_id: $boardId, item_id: $itemId, column_id: "${columnId}", value: $value) { id }
+    `mutation ($boardId: ID!, $itemId: ID!, $values: JSON!) {
+       change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $values) { id }
      }`,
-    { boardId: ACCOUNTS_BOARD_ID, itemId: accountId, value: text }
+    { boardId: ACCOUNTS_BOARD_ID, itemId: accountId, values: JSON.stringify(values) }
   );
 }
 
@@ -381,34 +384,55 @@ export interface SweepResult {
   reminderCount: number;
 }
 
+export interface SweepFailure {
+  accountId: string;
+  name: string;
+  error: string;
+}
+
+export interface SweepSummary {
+  results: SweepResult[];
+  failures: SweepFailure[];
+}
+
 // Daily escalation pass. For each allowed account whose Next Follow-Up Date is
 // strictly in the PAST (so Monday's "when date arrives" already fired and nobody
 // followed up — a follow-up would have pushed the date into the future):
 //   - under the escalation cap  -> move the date forward 2 business days, bump the counter
 //   - at the cap                -> clear the date and reset the counter (stop nagging)
 // Acting only on past dates avoids racing Monday's same-day notification.
-export async function runFollowUpSweep(today: string): Promise<SweepResult[]> {
+//
+// Each account is isolated in its own try/catch: one account's failure is recorded
+// and the sweep continues, so a single bad account can't starve the ones after it
+// (or block them every day). Callers surface `failures` (e.g. via a summary alert).
+export async function runFollowUpSweep(today: string): Promise<SweepSummary> {
   const accounts = await fetchAccountsWithFollowUp();
   const results: SweepResult[] = [];
+  const failures: SweepFailure[] = [];
 
   for (const acct of accounts) {
     if (!acct.nextFollowUp) continue; // no active follow-up
     if (acct.nextFollowUp >= today) continue; // due today or future — leave it to Monday
     if (!isAccountAllowed(acct.id)) continue; // guarded rollout
 
-    if (acct.reminderCount >= MAX_ESCALATIONS) {
-      // Escalation exhausted — stop nagging until a real contact restarts the cycle.
-      await clearAccountDate(acct.id, COLUMN_IDS.accountNextFollowUp);
-      await writeAccountNumber(acct.id, COLUMN_IDS.accountReminderCount, 0);
-      results.push({ accountId: acct.id, name: acct.name, action: 'exhausted', nextFollowUp: null, reminderCount: 0 });
-    } else {
-      const next = nextEscalationDate(acct.nextFollowUp, today);
-      const count = acct.reminderCount + 1;
-      await writeAccountDate(acct.id, COLUMN_IDS.accountNextFollowUp, next);
-      await writeAccountNumber(acct.id, COLUMN_IDS.accountReminderCount, count);
-      results.push({ accountId: acct.id, name: acct.name, action: 'escalated', nextFollowUp: next, reminderCount: count });
+    try {
+      if (acct.reminderCount >= MAX_ESCALATIONS) {
+        // Escalation exhausted — stop nagging until a real contact restarts the cycle.
+        await clearAccountDate(acct.id, COLUMN_IDS.accountNextFollowUp);
+        await writeAccountNumber(acct.id, COLUMN_IDS.accountReminderCount, 0);
+        results.push({ accountId: acct.id, name: acct.name, action: 'exhausted', nextFollowUp: null, reminderCount: 0 });
+      } else {
+        const next = nextEscalationDate(acct.nextFollowUp, today);
+        const count = acct.reminderCount + 1;
+        await writeAccountDate(acct.id, COLUMN_IDS.accountNextFollowUp, next);
+        await writeAccountNumber(acct.id, COLUMN_IDS.accountReminderCount, count);
+        results.push({ accountId: acct.id, name: acct.name, action: 'escalated', nextFollowUp: next, reminderCount: count });
+      }
+    } catch (e) {
+      console.error(`[cron-sweep] account ${acct.id} (${acct.name}) failed:`, e);
+      failures.push({ accountId: acct.id, name: acct.name, error: String(e) });
     }
   }
 
-  return results;
+  return { results, failures };
 }
