@@ -4,14 +4,9 @@ import {
   ALLOWED_ACCOUNT_IDS,
   COLUMN_IDS,
   INTERNAL_ACCOUNT_ID,
-  addDaysUTC,
-  findLinkedAccountId,
+  findLinkedAccountIds,
   isAccountAllowed,
-  nextBusinessDay,
-  readAccountInterval,
-  resolveOwnerSlackHandle,
-  rollUpAccountOutreach,
-  writeAccountColumns,
+  processAccountFollowUp,
 } from '@/lib/monday';
 import { MONDAY_SIGNING_SECRET, verifyMondaySignature } from '@/lib/auth';
 import { ALERTING_ENABLED, sendFailureAlert } from '@/lib/alert';
@@ -100,82 +95,28 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    // 1. Contact -> Account
-    const accountId = await findLinkedAccountId(String(contactId));
-    if (!accountId) {
+    // 1. Contact -> Account(s). A contact can be linked to several accounts (common
+    // with duplicate/merged rows), so process EVERY linked account, not just the
+    // first — otherwise a contact whose intended org isn't listed first is missed.
+    const accountIds = await findLinkedAccountIds(String(contactId));
+    if (accountIds.length === 0) {
       console.warn(`[monday-webhook] Contact ${contactId} has no linked account`);
       return NextResponse.json({ status: 'ignored', reason: 'no linked account' }, { status: 200 });
     }
 
-    // Guarded rollout: skip any account not on the allowlist (if one is set).
-    if (!isAccountAllowed(accountId)) {
-      console.log(`[monday-webhook] Account ${accountId} not on allowlist — skipping`);
-      return NextResponse.json({ status: 'ignored', reason: 'account not on allowlist', accountId });
+    // Guarded rollout: keep only allowlisted accounts (if a list is set).
+    const allowed = accountIds.filter(isAccountAllowed);
+    if (allowed.length === 0) {
+      console.log(`[monday-webhook] None of contact ${contactId}'s accounts are on the allowlist:`, accountIds);
+      return NextResponse.json({ status: 'ignored', reason: 'no linked account on allowlist', accountIds });
     }
 
-    // 2. The roll-up, the status/interval, and the owner's Slack handle are all
-    // independent reads — run them concurrently to keep well under the time limit.
-    // The handle lookup is allowed to fail on its own (→ '') so it can never undo
-    // the date logic; every other failure propagates to the retry-on-500 catch.
-    const [latestOutreach, intervalDays, ownerHandle] = await Promise.all([
-      rollUpAccountOutreach(accountId),
-      readAccountInterval(accountId),
-      resolveOwnerSlackHandle(accountId).catch((e) => {
-        console.warn(`[monday-webhook] Owner Slack handle resolution failed for ${accountId}:`, e);
-        return '';
-      }),
-    ]);
+    // 2. Roll up + stamp each allowed account (concurrently).
+    const results = await Promise.all(allowed.map((id) => processAccountFollowUp(id)));
 
-    if (!latestOutreach) {
-      console.warn(`[monday-webhook] Account ${accountId} has no contact outreach dates`);
-      return NextResponse.json({ status: 'ignored', reason: 'no outreach dates' }, { status: 200 });
-    }
+    console.log(`[monday-webhook] Contact ${contactId} -> accounts ${allowed.join(', ')}:`, results);
 
-    // A null interval means a no-follow-up stage (Active Client / Closed / Vendor):
-    // roll up the latest outreach + stamp the owner, but clear the follow-up date so
-    // the account stops nagging.
-    if (intervalDays === null) {
-      await writeAccountColumns(accountId, {
-        [COLUMN_IDS.accountLatestOutreach]: { date: latestOutreach },
-        [COLUMN_IDS.accountNextFollowUp]: {}, // clear
-        [COLUMN_IDS.accountReminderCount]: '0',
-        [COLUMN_IDS.accountPersonToSlack]: ownerHandle,
-      });
-      console.log(
-        `[monday-webhook] Account ${accountId}: latestOutreach=${latestOutreach}, stage=no-follow-up, cleared Next Follow-Up Date`
-      );
-      return NextResponse.json({
-        status: 'ok',
-        accountId,
-        latestOutreach,
-        intervalDays: null,
-        nextFollowUp: null,
-      });
-    }
-
-    // Land the follow-up on a weekday, reset the escalation counter (this contact
-    // event starts a fresh cycle), and stamp the owner's Slack handle — all in one
-    // write so the Monday -> Slack automation can @mention them.
-    const nextFollowUp = nextBusinessDay(addDaysUTC(latestOutreach, intervalDays));
-    await writeAccountColumns(accountId, {
-      [COLUMN_IDS.accountLatestOutreach]: { date: latestOutreach },
-      [COLUMN_IDS.accountNextFollowUp]: { date: nextFollowUp },
-      [COLUMN_IDS.accountReminderCount]: '0',
-      [COLUMN_IDS.accountPersonToSlack]: ownerHandle,
-    });
-
-    console.log(
-      `[monday-webhook] Account ${accountId}: latestOutreach=${latestOutreach}, interval=${intervalDays}, nextFollowUp=${nextFollowUp}, ownerHandle=${ownerHandle || '(none)'}`
-    );
-
-    return NextResponse.json({
-      status: 'ok',
-      accountId,
-      latestOutreach,
-      intervalDays,
-      nextFollowUp,
-      ownerHandle: ownerHandle || null,
-    });
+    return NextResponse.json({ status: 'ok', contactId, results });
   } catch (err) {
     console.error('[monday-webhook] Error processing webhook:', err);
     await sendFailureAlert(`⚠️ Follow-up *webhook* failed for contact ${contactId}: ${String(err)}`);

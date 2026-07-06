@@ -126,8 +126,11 @@ export function addBusinessDays(yyyymmdd: string, n: number): string {
 
 // --- Domain steps ------------------------------------------------------------
 
-// Resolve the Account linked to a contact. Returns the first linked account id.
-export async function findLinkedAccountId(contactId: string): Promise<string | null> {
+// All Accounts linked to a contact. A contact can link to several accounts —
+// duplicate/merged contact rows often point at multiple orgs — so we return every
+// linked id and let the caller roll up each allowed one, instead of guessing with
+// the first (which may not even be the account that was meant).
+export async function findLinkedAccountIds(contactId: string): Promise<string[]> {
   const data = await mondayRequest(
     `query ($itemId: [ID!]) {
        items(ids: $itemId) {
@@ -138,8 +141,7 @@ export async function findLinkedAccountId(contactId: string): Promise<string | n
      }`,
     { itemId: [contactId] }
   );
-  const ids: string[] = data?.items?.[0]?.column_values?.[0]?.linked_item_ids ?? [];
-  return ids[0] ?? null;
+  return data?.items?.[0]?.column_values?.[0]?.linked_item_ids ?? [];
 }
 
 // Most recent Latest Outreach Date across ALL of the account's contacts.
@@ -316,6 +318,60 @@ export async function resolveOwnerSlackHandle(accountId: string): Promise<string
   if (!ownerName) return '';
   const roster = await fetchInternalSlackRoster();
   return toSlackMention(roster[normalizeName(ownerName)] ?? '');
+}
+
+// --- Per-account follow-up update -------------------------------------------
+
+export interface AccountUpdateResult {
+  accountId: string;
+  status: 'updated' | 'no-follow-up' | 'no-outreach-dates';
+  latestOutreach: string | null;
+  intervalDays: number | null;
+  nextFollowUp: string | null;
+  ownerHandle: string;
+}
+
+// Core update for a single account: roll up the most-recent outreach across ITS
+// contacts, derive the follow-up date from its status cadence, resolve the owner's
+// Slack mention, and write it all in one mutation. Factored out so the webhook can
+// run it once per linked account (handling contacts that belong to several).
+//
+// The three reads run concurrently; the owner lookup can fail on its own (→ '') so
+// it never undoes the date logic. Any other failure propagates to the caller.
+export async function processAccountFollowUp(accountId: string): Promise<AccountUpdateResult> {
+  const [latestOutreach, intervalDays, ownerHandle] = await Promise.all([
+    rollUpAccountOutreach(accountId),
+    readAccountInterval(accountId),
+    resolveOwnerSlackHandle(accountId).catch((e) => {
+      console.warn(`[followup] Owner Slack handle resolution failed for ${accountId}:`, e);
+      return '';
+    }),
+  ]);
+
+  if (!latestOutreach) {
+    return { accountId, status: 'no-outreach-dates', latestOutreach: null, intervalDays, nextFollowUp: null, ownerHandle };
+  }
+
+  // No-follow-up stage (Active Client / Closed / Vendor): stamp the roll-up + owner
+  // but clear the follow-up date so the account stops nagging.
+  if (intervalDays === null) {
+    await writeAccountColumns(accountId, {
+      [COLUMN_IDS.accountLatestOutreach]: { date: latestOutreach },
+      [COLUMN_IDS.accountNextFollowUp]: {}, // clear
+      [COLUMN_IDS.accountReminderCount]: '0',
+      [COLUMN_IDS.accountPersonToSlack]: ownerHandle,
+    });
+    return { accountId, status: 'no-follow-up', latestOutreach, intervalDays: null, nextFollowUp: null, ownerHandle };
+  }
+
+  const nextFollowUp = nextBusinessDay(addDaysUTC(latestOutreach, intervalDays));
+  await writeAccountColumns(accountId, {
+    [COLUMN_IDS.accountLatestOutreach]: { date: latestOutreach },
+    [COLUMN_IDS.accountNextFollowUp]: { date: nextFollowUp },
+    [COLUMN_IDS.accountReminderCount]: '0',
+    [COLUMN_IDS.accountPersonToSlack]: ownerHandle,
+  });
+  return { accountId, status: 'updated', latestOutreach, intervalDays, nextFollowUp, ownerHandle };
 }
 
 // --- Escalation sweep --------------------------------------------------------
