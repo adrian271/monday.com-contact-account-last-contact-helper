@@ -26,6 +26,27 @@ const box: React.CSSProperties = {
   padding: '0.85rem 1.1rem',
 };
 
+const thc: React.CSSProperties = {
+  textAlign: 'left',
+  borderBottom: '2px solid #d6d3d1',
+  padding: '0.4rem 0.75rem 0.4rem 0',
+};
+const tdc: React.CSSProperties = {
+  borderBottom: '1px solid #e7e5e4',
+  padding: '0.5rem 0.75rem 0.5rem 0',
+  verticalAlign: 'top',
+};
+
+// Illustrative escalation timeline (a follow-up that comes due Monday with no reply).
+const escalationExample = [
+  { day: 'Mon', what: 'Slack reminder fires (nudge 1)', date: 'Mon' },
+  { day: 'Tue', what: 'Sweep: date is past → advance +2 business days (count 1)', date: 'Wed' },
+  { day: 'Wed', what: 'Slack reminder fires (nudge 2)', date: 'Wed' },
+  { day: 'Thu', what: 'Sweep: advance +2 business days (count 2)', date: 'Fri' },
+  { day: 'Fri', what: 'Slack reminder fires (nudge 3)', date: 'Fri' },
+  { day: 'Sat', what: 'Sweep: cap reached → clear the date, reset counter', date: '(blank)' },
+];
+
 export default function Home() {
   const guarded = ALLOWED_ACCOUNT_IDS.length > 0;
 
@@ -119,6 +140,33 @@ export default function Home() {
         <code>GET /api/cron/sweep</code> (Vercel Cron, 13:00 UTC); Monday still sends the Slack
         message each time the date lands.
       </p>
+      <p style={{ marginBottom: '0.25rem' }}>
+        Example &mdash; a follow-up comes due <strong>Monday</strong> and nobody replies. The
+        reminder fires the day the date arrives; the sweep advances it the <em>next</em> day (it
+        only touches dates already in the past, so it never double-fires with Monday):
+      </p>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', width: '100%' }}>
+          <thead>
+            <tr>
+              <th style={thc}>Day</th>
+              <th style={thc}>What happens</th>
+              <th style={thc}>Next Follow-Up</th>
+            </tr>
+          </thead>
+          <tbody>
+            {escalationExample.map((r) => (
+              <tr key={r.day}>
+                <td style={tdc}>
+                  <strong>{r.day}</strong>
+                </td>
+                <td style={tdc}>{r.what}</td>
+                <td style={tdc}>{r.date}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
       <h2>Owner notifications</h2>
       <p>

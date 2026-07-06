@@ -240,7 +240,23 @@ dates means it never races Monday's own same-day reminder):
   until someone is contacted again (which restarts the whole cycle via the webhook).
 
 The result is three nudges — on the due date, +2 business days, and +2 more — then
-silence. The endpoint is protected by `CRON_SECRET` (see Deploy).
+silence, unless someone makes contact (which resets the whole cycle via the webhook).
+
+**Example** — a follow-up comes due on a Monday and nobody follows up. Note the
+reminder fires the day the date *arrives*, and the sweep advances it the *next* day
+(it only touches dates strictly in the past, so it never double-fires with Monday):
+
+| Day       | What happens                                                        | Next Follow-Up |
+|-----------|---------------------------------------------------------------------|----------------|
+| **Mon**   | Slack reminder fires (nudge 1)                                       | Mon            |
+| **Tue**   | Sweep: date is past → advance +2 business days, count → 1            | Wed            |
+| **Wed**   | Slack reminder fires (nudge 2)                                       | Wed            |
+| **Thu**   | Sweep: advance +2 business days, count → 2                          | Fri            |
+| **Fri**   | Slack reminder fires (nudge 3)                                       | Fri            |
+| **Sat**   | Sweep: escalation cap reached → clear the date, reset the counter    | _(blank)_      |
+
+So on the due day itself the date stays put — that's expected; the sweep moves it the
+following day. The endpoint is protected by `CRON_SECRET` (see Deploy).
 
 ## Configuration reference
 
