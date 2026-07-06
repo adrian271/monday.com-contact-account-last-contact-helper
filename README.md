@@ -60,7 +60,7 @@ Follow-up dates always land on a **weekday**, and escalation reminders step forw
 |-----------------------|-----------------|-----------------------------------------|
 | Latest Outreach Date  | Date            | Stamped when a contact is reached out to |
 | Account               | Connect boards  | Links each contact to its Account        |
-| Slack Handle          | Text            | Each team member's Slack handle (e.g. `@jenna`) — read for the owner roster (see below) |
+| Slack Handle          | Text            | Each team member's Slack **member ID** (e.g. `U0B5N1JHDPZ`) — read for the owner roster (see below) |
 
 **Accounts board** — holds the per-account follow-up state:
 
@@ -80,24 +80,32 @@ Follow-up dates always land on a **weekday**, and escalation reminders step forw
 
 ### Owner → Slack handle (the roster)
 
-The reminder should @mention **whoever owns the account**, dynamically. Monday's
-Slack "send message" action can't mention a people column directly, and Monday user
-profiles don't expose a Slack handle — so the service resolves it from your own data:
+The reminder should @mention **whoever owns the account**, dynamically. Two Slack
+facts shape this: Slack only turns **`<@MEMBER_ID>`** (a member ID in angle brackets)
+into a real ping — a plain `@handle` posted by a bot stays inert text — and Monday's
+Slack action can't mention a people column directly. So the service resolves the
+mention from your own data:
 
 1. Your internal team members each have a **contact row** under one dedicated
    "team" account (for 10/10 Research, the account of the same name — set its ID as
-   `MONDAY_INTERNAL_ACCOUNT_ID`), with their **Slack Handle** column filled.
+   `MONDAY_INTERNAL_ACCOUNT_ID`), with their **Slack member ID** in the **Slack Handle**
+   column. (Get an ID from Slack: profile → **⋮ More** → **Copy member ID**, e.g.
+   `U0B5N1JHDPZ`.)
 2. On each webhook, the service reads the account's **Owner**, matches the owner's
    name against that roster (case-insensitive; trailing credentials like `, PhD` are
-   ignored), and writes the matched **Slack Handle** into **Person to Slack**.
-3. The Slack automation's message uses the **`{Person to Slack}`** token, which
-   outputs e.g. `@jenna` — Slack renders it as a real ping.
+   ignored), formats the member ID as `<@…>`, and writes it into **Person to Slack**.
+3. The Slack automation's message uses the **`{Person to Slack}`** token, which now
+   outputs `<@U0B5N1JHDPZ>` — Slack renders it as a real ping.
 
 **Maintenance:** when a new person can own accounts, add them once as a contact under
-the team account with their Slack Handle — no code or config change. An owner with no
-matching roster entry (or a blank handle) resolves to an empty Person to Slack, so the
-reminder simply posts without a ping (safe). Matching is **by name**, so an owner's
+the team account with their Slack **member ID** — no code or config change. An owner
+with no matching roster entry (or a blank ID) resolves to an empty Person to Slack, so
+the reminder simply posts without a ping (safe). Matching is **by name**, so an owner's
 Monday display name must match their roster contact name.
+
+> **Member IDs, not handles.** A value like `@jenna` will *not* ping — only the member
+> ID does. The service tolerates a bare ID (`U0B5N1JHDPZ`), an `@`-prefixed one, or an
+> already-wrapped `<@…>`; anything else is passed through as inert text.
 
 ## Setup
 
@@ -185,11 +193,13 @@ On your **Accounts** board → **Automate → Create custom automation**:
 - Action: **Send Slack notification** → `#client-outreach`, and include the
   **`{Person to Slack}`** column as a token in the message to @-ping the account owner,
   e.g. `{Person to Slack} — {Account's Name} is due for outreach`. The service keeps
-  `Person to Slack` populated with the owner's handle (see [the roster](#owner--slack-handle-the-roster)).
+  `Person to Slack` populated with the owner's `<@member_id>` mention (see
+  [the roster](#owner--slack-handle-the-roster)).
 
-> Don't try to @-mention the **Owner** people column directly — Monday's Slack action
-> only substitutes it as plain text (the person's name), which Slack won't turn into a
-> ping. The `{Person to Slack}` handle is what resolves to an actual mention.
+> Don't try to @-mention the **Owner** people column directly, and don't type a plain
+> `@handle` — Monday substitutes both as inert text that Slack won't turn into a ping.
+> Only the `{Person to Slack}` token (a `<@member_id>` written by the service) resolves
+> to an actual mention.
 
 > **Keep this automation Slack-only — do not add a "set date" or "clear date" action.**
 > The service owns the Next Follow-Up Date lifecycle: the webhook sets it, and the

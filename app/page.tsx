@@ -122,22 +122,24 @@ export default function Home() {
 
       <h2>Owner notifications</h2>
       <p>
-        The reminder @mentions whoever <strong>owns</strong> the account. Since Monday can&rsquo;t
-        mention a people column directly, the service keeps a text column,{' '}
-        <strong>Person to Slack</strong>, filled with the owner&rsquo;s Slack handle:
+        The reminder @mentions whoever <strong>owns</strong> the account. Slack only pings a
+        member-ID mention (<code>&lt;@U…&gt;</code>), not a plain <code>@handle</code>, and Monday
+        can&rsquo;t mention a people column directly &mdash; so the service keeps a text column,{' '}
+        <strong>Person to Slack</strong>, filled with the owner&rsquo;s real mention:
       </p>
       <ul>
         <li>
           Each team member has a contact row under the internal <strong>team account</strong> with
-          their <strong>Slack Handle</strong> set.
+          their <strong>Slack member ID</strong> (e.g. <code>U0B5N1JHDPZ</code>) in the Slack Handle
+          column.
         </li>
         <li>
-          On each update, the service matches the account&rsquo;s Owner name to that roster and
-          writes the handle to <strong>Person to Slack</strong>; the Slack message uses the{' '}
-          <code>{'{Person to Slack}'}</code> token to ping them.
+          On each update, the service matches the account&rsquo;s Owner name to that roster, wraps
+          the member ID as <code>&lt;@…&gt;</code>, and writes it to <strong>Person to Slack</strong>;
+          the Slack message uses the <code>{'{Person to Slack}'}</code> token to ping them.
         </li>
         <li>
-          A new potential owner just needs a roster contact with a Slack Handle &mdash; no code
+          A new potential owner just needs a roster contact with a Slack member ID &mdash; no code
           change. An unmatched owner posts without a ping (safe).
         </li>
       </ul>

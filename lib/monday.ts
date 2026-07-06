@@ -289,14 +289,30 @@ export async function fetchInternalSlackRoster(): Promise<Record<string, string>
   return roster;
 }
 
-// Resolve the account owner's Slack handle by matching the owner's name against
-// the internal team roster. Returns '' when there's no owner, no matching roster
-// entry, or that member has no handle set (all safe "no ping" cases).
+// Convert a stored Slack identifier into a mention Slack will actually ping.
+// Slack only renders `<@MEMBER_ID>` (angle brackets) as a real @mention — a plain
+// "@handle" posted by a bot stays inert text. So roster entries should hold each
+// person's Slack MEMBER ID (e.g. "U0B5N1JHDPZ"; a leading "@" or existing "<@ >"
+// wrapping is tolerated). Anything that isn't a member ID is passed through as-is
+// (it won't ping, but the message still shows something — a safe fallback).
+export function toSlackMention(raw: string): string {
+  const v = raw.trim();
+  if (!v) return '';
+  if (v.startsWith('<@')) return v; // already a mention escape
+  const id = v.replace(/^@/, ''); // tolerate a stray leading "@"
+  if (/^[UW][A-Z0-9]{6,}$/i.test(id)) return `<@${id}>`; // Slack member ID
+  return v;
+}
+
+// Resolve the account owner's Slack mention by matching the owner's name against
+// the internal team roster, then formatting the member ID as a `<@…>` mention.
+// Returns '' when there's no owner, no matching roster entry, or no ID set (all
+// safe "no ping" cases).
 export async function resolveOwnerSlackHandle(accountId: string): Promise<string> {
   const ownerName = await readAccountOwnerName(accountId);
   if (!ownerName) return '';
   const roster = await fetchInternalSlackRoster();
-  return roster[normalizeName(ownerName)] ?? '';
+  return toSlackMention(roster[normalizeName(ownerName)] ?? '');
 }
 
 // --- Escalation sweep --------------------------------------------------------
