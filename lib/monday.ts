@@ -25,6 +25,11 @@ export const COLUMN_IDS = {
   accountContactsLink: process.env.MONDAY_ACCOUNT_CONTACTS_LINK_COLUMN_ID || 'YOUR_ACCOUNT_CONTACTS_LINK_COLUMN_ID',
   accountLatestOutreach: process.env.MONDAY_ACCOUNT_LATEST_OUTREACH_COLUMN_ID || 'YOUR_ACCOUNT_LATEST_OUTREACH_COLUMN_ID',
   accountStage: process.env.MONDAY_ACCOUNT_STAGE_COLUMN_ID || 'YOUR_ACCOUNT_STAGE_COLUMN_ID',
+  // Optional Number column: an explicit per-account follow-up interval (days). When
+  // set to a positive value it OVERRIDES the status-derived cadence below (and even
+  // a no-follow-up status) — e.g. set 365 for a deliberate 1-year wait. Blank/zero/
+  // invalid falls back to the STAGE_INTERVAL_DAYS rule.
+  accountInterval: process.env.MONDAY_ACCOUNT_INTERVAL_COLUMN_ID || 'YOUR_ACCOUNT_INTERVAL_COLUMN_ID',
   accountNextFollowUp: process.env.MONDAY_ACCOUNT_NEXT_FOLLOWUP_COLUMN_ID || 'YOUR_ACCOUNT_NEXT_FOLLOWUP_COLUMN_ID',
   accountOwner: process.env.MONDAY_ACCOUNT_OWNER_COLUMN_ID || 'YOUR_ACCOUNT_OWNER_COLUMN_ID',
   // Text column this service writes the owner's Slack handle into, so the Monday ->
@@ -93,9 +98,20 @@ export async function mondayRequest<T = any>(
   return json.data as T;
 }
 
+// Reduce any Monday date value to its YYYY-MM-DD prefix. When a Monday date
+// column has time enabled, its `text` comes back as "YYYY-MM-DD HH:MM" (and a
+// webhook value can carry an ISO "YYYY-MM-DDTHH:MM:SSZ"). Either would feed a
+// bogus "2026-07-23 14:30T00:00:00Z" into addDaysUTC() below and throw
+// (Invalid Date -> .toISOString() RangeError), 500-ing the webhook. Splitting on
+// the first space or 'T' keeps just the calendar day, which is all we ever use.
+export function dateOnly(value: string | null | undefined): string {
+  return (value ?? '').trim().split(/[ T]/)[0];
+}
+
 // Add whole days to a YYYY-MM-DD date using UTC math (no timezone off-by-one).
+// Tolerates a time component on the input via dateOnly().
 export function addDaysUTC(yyyymmdd: string, days: number): string {
-  const d = new Date(`${yyyymmdd}T00:00:00Z`);
+  const d = new Date(`${dateOnly(yyyymmdd)}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().split('T')[0];
 }
@@ -171,27 +187,53 @@ export async function rollUpAccountOutreach(accountId: string): Promise<string |
 
   let maxDate = '';
   for (const c of contacts?.items ?? []) {
-    const d = c.column_values?.[0]?.text ?? '';
+    // Strip any time component so the comparison (and later date math) stays on
+    // YYYY-MM-DD; a "2026-07-23 14:30" text would otherwise crash addDaysUTC.
+    const d = dateOnly(c.column_values?.[0]?.text);
     if (d && d > maxDate) maxDate = d;
   }
   return maxDate || null;
 }
 
-// Resolve the account's follow-up cadence from its Status column.
-// Returns the interval in days, or `null` when the stage means "no follow-up".
+// Resolve the account's follow-up cadence. The explicit Follow-up Interval (days)
+// Number column wins when it holds a positive value — it overrides the status rule
+// (and even a no-follow-up status), which is how a team member forces, say, a
+// deliberate 1-year wait. Otherwise the Status label drives the cadence.
+// Returns the interval in days, or `null` when the resolved rule means "no follow-up".
 export async function readAccountInterval(accountId: string): Promise<number | null> {
   const data = await mondayRequest(
     `query ($itemId: [ID!]) {
        items(ids: $itemId) {
-         column_values(ids: ["${COLUMN_IDS.accountStage}"]) { text }
+         column_values(ids: ["${COLUMN_IDS.accountStage}", "${COLUMN_IDS.accountInterval}"]) { id text }
        }
      }`,
     { itemId: [accountId] }
   );
-  const label = (data?.items?.[0]?.column_values?.[0]?.text ?? '').trim();
+  const byId: Record<string, string> = {};
+  for (const cv of data?.items?.[0]?.column_values ?? []) byId[cv.id] = cv.text ?? '';
+
+  // Explicit interval override: a positive integer number of days.
+  const override = parseInt(byId[COLUMN_IDS.accountInterval] ?? '', 10);
+  if (Number.isFinite(override) && override > 0) return override;
+
+  const label = (byId[COLUMN_IDS.accountStage] ?? '').trim();
   // A known label maps to its cadence (which may be null = skip); anything else
   // (blank / unrecognized) uses the cold-cadence default.
   return label in STAGE_INTERVAL_DAYS ? STAGE_INTERVAL_DAYS[label] : DEFAULT_INTERVAL_DAYS;
+}
+
+// Read a single date column's current value as YYYY-MM-DD ('' if unset). Used to
+// detect a manual follow-up override before we consider overwriting it.
+export async function readAccountDate(accountId: string, columnId: string): Promise<string> {
+  const data = await mondayRequest(
+    `query ($itemId: [ID!]) {
+       items(ids: $itemId) {
+         column_values(ids: ["${columnId}"]) { text }
+       }
+     }`,
+    { itemId: [accountId] }
+  );
+  return dateOnly(data?.items?.[0]?.column_values?.[0]?.text);
 }
 
 export async function writeAccountDate(accountId: string, columnId: string, date: string) {
@@ -324,7 +366,7 @@ export async function resolveOwnerSlackHandle(accountId: string): Promise<string
 
 export interface AccountUpdateResult {
   accountId: string;
-  status: 'updated' | 'no-follow-up' | 'no-outreach-dates';
+  status: 'updated' | 'override-honored' | 'no-follow-up' | 'no-outreach-dates';
   latestOutreach: string | null;
   intervalDays: number | null;
   nextFollowUp: string | null;
@@ -339,9 +381,10 @@ export interface AccountUpdateResult {
 // The three reads run concurrently; the owner lookup can fail on its own (→ '') so
 // it never undoes the date logic. Any other failure propagates to the caller.
 export async function processAccountFollowUp(accountId: string): Promise<AccountUpdateResult> {
-  const [latestOutreach, intervalDays, ownerHandle] = await Promise.all([
+  const [latestOutreach, intervalDays, existingFollowUp, ownerHandle] = await Promise.all([
     rollUpAccountOutreach(accountId),
     readAccountInterval(accountId),
+    readAccountDate(accountId, COLUMN_IDS.accountNextFollowUp),
     resolveOwnerSlackHandle(accountId).catch((e) => {
       console.warn(`[followup] Owner Slack handle resolution failed for ${accountId}:`, e);
       return '';
@@ -364,14 +407,31 @@ export async function processAccountFollowUp(accountId: string): Promise<Account
     return { accountId, status: 'no-follow-up', latestOutreach, intervalDays: null, nextFollowUp: null, ownerHandle };
   }
 
-  const nextFollowUp = nextBusinessDay(addDaysUTC(latestOutreach, intervalDays));
+  const computed = nextBusinessDay(addDaysUTC(latestOutreach, intervalDays));
+
+  // Honor a manual override (per Jenna): a Next Follow-Up Date further out than what
+  // the rules produce could only have been set deliberately by a human (a longer
+  // wait — e.g. a 1-year hold — that routine re-contact must not shorten). Keep it.
+  // A date at/before the computed one is the automation's own prior write (or stale),
+  // so it re-computes normally. The escalation sweep only touches PAST dates, so a
+  // future override is never disturbed there either.
+  const isManualOverride = Boolean(existingFollowUp) && existingFollowUp > computed;
+  const nextFollowUp = isManualOverride ? existingFollowUp : computed;
+
   await writeAccountColumns(accountId, {
     [COLUMN_IDS.accountLatestOutreach]: { date: latestOutreach },
     [COLUMN_IDS.accountNextFollowUp]: { date: nextFollowUp },
     [COLUMN_IDS.accountReminderCount]: '0',
     [COLUMN_IDS.accountPersonToSlack]: ownerHandle,
   });
-  return { accountId, status: 'updated', latestOutreach, intervalDays, nextFollowUp, ownerHandle };
+  return {
+    accountId,
+    status: isManualOverride ? 'override-honored' : 'updated',
+    latestOutreach,
+    intervalDays,
+    nextFollowUp,
+    ownerHandle,
+  };
 }
 
 // --- Escalation sweep --------------------------------------------------------
@@ -412,7 +472,9 @@ async function fetchAccountsWithFollowUp(): Promise<AccountFollowUp[]> {
       out.push({
         id: item.id,
         name: item.name,
-        nextFollowUp: byId[COLUMN_IDS.accountNextFollowUp] ?? '',
+        // Normalize to YYYY-MM-DD: a follow-up date stored with a time would
+        // break both the `>= today` comparison and addBusinessDays() in the sweep.
+        nextFollowUp: dateOnly(byId[COLUMN_IDS.accountNextFollowUp]),
         reminderCount: parseInt(byId[COLUMN_IDS.accountReminderCount] ?? '', 10) || 0,
       });
     }

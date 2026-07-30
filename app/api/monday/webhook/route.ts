@@ -43,6 +43,7 @@ export async function GET() {
       accountContactsLink: configured(COLUMN_IDS.accountContactsLink),
       accountLatestOutreach: configured(COLUMN_IDS.accountLatestOutreach),
       accountStage: configured(COLUMN_IDS.accountStage),
+      accountInterval: configured(COLUMN_IDS.accountInterval),
       accountNextFollowUp: configured(COLUMN_IDS.accountNextFollowUp),
       accountReminderCount: configured(COLUMN_IDS.accountReminderCount),
       accountOwner: configured(COLUMN_IDS.accountOwner),

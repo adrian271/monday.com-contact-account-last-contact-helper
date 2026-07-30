@@ -57,6 +57,11 @@ A small background service sits alongside Monday and handles just the pieces Mon
 2. Looks at **every contact** on that account and takes the **most recent** outreach date — the account's true "last contacted."
 3. Reads **that account's Status**, maps it to an interval, adds it to the most-recent date (landing on a weekday), and writes the account's **Next Follow-Up Date**. Accounts in a no-follow-up stage have their date cleared instead.
 
+Two manual overrides sit on top of this:
+
+- **Follow-up Interval (days)** — if this account-level field has a number in it, that number is used as the interval instead of the status-based cadence (even for a stage that would otherwise get no follow-up). Set it to `365` for a deliberate one-year wait; leave it blank to let Status decide.
+- **A hand-set Next Follow-Up Date** — if someone has already pushed the date further out than the rules would produce, the service leaves it alone. Routine contact won't drag a one-year hold back to next week. To hand the account back to the automation, clear the date (or shorten the interval); to stop follow-ups entirely, move it to a no-follow-up stage.
+
 **Once a day**, a scheduled sweep looks for accounts whose follow-up date has passed without anyone acting, and walks them through the escalation: push the date forward 2 business days (re-arming Monday's reminder), up to twice, then clear it so the account goes quiet until the next real contact.
 
 From there, Monday takes over and sends the Slack notification natively — it just needed someone to do the roll-up, the stage-aware math, and the business-day escalation first.
